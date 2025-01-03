@@ -22,6 +22,7 @@ class LoginForm:
         self.password: Optional[str] = None
         self.service: str = "/"
         self.site_title: str = settings.auth_realm
+        self.auth_login_location: str = "/" + settings.auth_location + "/login"
 
     async def load_data(self) -> None:
         """

@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     #: Use this as the title for the login form, to give a hint to the
     #: user as to what they're logging into
     auth_realm: str = 'Restricted'
+    #: The location of the auth form
+    auth_location: str = 'auth'
 
     # ==================
     # Session

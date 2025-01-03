@@ -66,7 +66,7 @@ app = FastAPI(
     debug=settings.debug,
     version=__version__
 )
-app.mount("/auth/static", StaticFiles(directory=static_dir), name="static")
+app.mount("/" + settings.auth_location + "/static", StaticFiles(directory=static_dir), name="static")
 app.add_middleware(
     SessionMiddleware,
     store=store,
@@ -127,7 +127,7 @@ async def kill_session(request: Request) -> None:
 # Views
 # --------------------------------------
 
-@app.get("/auth/login", response_class=HTMLResponse, name="login")
+@app.get("/" + settings.auth_location + "/login", response_class=HTMLResponse, name="login")
 async def login(request: Request, service: str = "/"):
     """
     If the user is already logged in, redirect to the URI named by the ``service``,
@@ -162,12 +162,13 @@ async def login(request: Request, service: str = "/"):
         {
             "request": request,
             "site_title": auth_realm,
-            "service": service
+            "service": service,
+            "auth_login_location": "/" + settings.auth_location + "/login",
         }
     )
 
 
-@app.post("/auth/login", response_class=HTMLResponse, name="login_handler")
+@app.post("/" + settings.auth_location + "/login", response_class=HTMLResponse, name="login_handler")
 async def login_handler(request: Request):
     """
     Process our user's login request.  If authentication is successful, redirect
@@ -185,6 +186,7 @@ async def login_handler(request: Request):
     auth_realm = request.headers.get("x-auth-realm", settings.auth_realm)
     form = LoginForm(request)
     form.site_title = auth_realm
+    form.auth_login_location = "/" + settings.auth_location + "/login"
     await form.load_data()
     if await form.is_valid():
         await load_session(request)
@@ -194,7 +196,7 @@ async def login_handler(request: Request):
         return templates.TemplateResponse("login.html", form.__dict__)
 
 
-@app.get("/auth/logout", response_class=HTMLResponse, name="logout")
+@app.get("/" + settings.auth_location + "/logout", response_class=HTMLResponse, name="logout")
 async def logout(request: Request):
     """
     Log the user out and redirect to the login page.
@@ -207,7 +209,7 @@ async def logout(request: Request):
     if username := request.session.get("username"):
         await kill_session(request)
         _logger.info("auth.logout", username=username)
-    return RedirectResponse(url='/auth/login?service=/')
+    return RedirectResponse(url='/' + settings.auth_location + '/login?service=/')
 
 
 @app.get("/check")

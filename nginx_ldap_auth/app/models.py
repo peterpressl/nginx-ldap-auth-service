@@ -70,12 +70,12 @@ class UserManager:
         )
         await self.pool.open()
 
-    async def authenticate(self, username: str, password: str) -> bool:
+    async def authenticate(self, dn: str, password: str) -> bool:
         """
         Authenticate a user against the LDAP server.
 
         Args:
-            username: the username to authenticate
+            dn: the dn of the user to authenticate
             password: the password to authenticate with
 
         Raises:
@@ -86,19 +86,16 @@ class UserManager:
         """
         if not self.pool:
             await self.create_pool()
-        dn = '{}={},{}'.format(
-            self.settings.ldap_username_attribute,
-            username,
-            self.settings.ldap_basedn
-        )
+
         client = self.client()
         client.set_credentials("SIMPLE", user=dn, password=password)
         try:
             await client.connect(is_async=True)
-        except AuthenticationError:
+        except AuthenticationError as error:
+            logger.error('ldap.authenticate.authError', user=dn, error=error)
             return False
-        except LDAPError:
-            logger.exception('ldap.authenticate.exception', uid=username)
+        except LDAPError as error:
+            logger.exception('ldap.authenticate.exception', user=dn, error=error)
             raise
         return True
 
@@ -229,7 +226,7 @@ class UserManager:
                     username=username,
                     dns=';'.join([r[0] for r in results])
                 )
-            return self.model.parse_ldap(results[0])
+            return self.model.parse_ldap(self.settings, results[0])
         return None
 
     async def cleanup(self) -> None:
@@ -245,9 +242,11 @@ class User(BaseModel):
     objects: ClassVar["UserManager"] = UserManager()
 
     #: The username of the user.
-    uid: str
+    username: str
     #: The full name of the user.  We really only use this for logging.
     full_name: str
+    #: The distinguished name of the user.
+    dn: str
 
     async def authenticate(self, password: str) -> bool:
         """
@@ -259,13 +258,14 @@ class User(BaseModel):
         Returns:
             ``True`` if the user is authenticated, ``False`` otherwise
         """
-        return await self.objects.authenticate(self.uid, password)
+        return await self.objects.authenticate(self.dn, password)
 
     @classmethod
-    def parse_ldap(cls, data: LDAPObject) -> "User":
+    def parse_ldap(cls, settings: Settings, data: LDAPObject) -> "User":
         kwargs = {
-            'uid': data['uid'][0],
-            'full_name': data['cn'][0],
+            'dn': str(data.dn),
+            'username': data[settings.ldap_username_attribute][0],
+            'full_name': data[settings.ldap_full_name_attribute][0],
         }
         return cls(**kwargs)
 

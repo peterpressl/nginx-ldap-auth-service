@@ -44,7 +44,7 @@
                     <div class="alert alert-danger mb-3" role="alert">{{ error }}</div>
                     {% endfor %}
                 {% endif %}
-                <form method="post" action="/auth/login">
+                <form method="post" action={{ auth_login_location }}>
                     <input type="hidden" name="service" value="{{ service }}">
                     <div class="form-outline mb-4">
                         <input class="form-control form-control-lg" type="text" name="username" id="username" placeholder="Username" required="true" autofocus="true" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" value="{{ username }}">
