@@ -1,37 +1,31 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+from typing import ClassVar, Optional, cast
 
-from typing import (
-    cast,
-    ClassVar,
-    Optional,
-    Type
-)
-
-import bonsai  # type: ignore
-from bonsai.errors import (  # type: ignore
-    LDAPError,
+import bonsai
+from bonsai.errors import (
     AuthenticationError,
+    LDAPError,
 )
-from bonsai.utils import escape_filter_exp  # type: ignore
-from pydantic import BaseModel  # pylint: disable=no-name-in-module
+from bonsai.utils import escape_filter_exp
+from pydantic import BaseModel
 
-from nginx_ldap_auth.ldap import TimeLimitedAIOLDAPConnection, TimeLimitedAIOConnectionPool
+from nginx_ldap_auth.ldap import (
+    TimeLimitedAIOConnectionPool,
+    TimeLimitedAIOLDAPConnection,
+)
 from nginx_ldap_auth.logging import logger
 from nginx_ldap_auth.settings import Settings
 from nginx_ldap_auth.types import LDAPObject
 
 
 class UserManager:
-
     #: The model class for users
-    model: ClassVar[Type["User"]]
+    model: ClassVar[type["User"]]
 
     def __init__(self) -> None:
         #: The application settings
         self.settings = Settings()
         #: The LDAP connection pool
-        self.pool: Optional[TimeLimitedAIOConnectionPool] = None
+        self.pool: TimeLimitedAIOConnectionPool | None = None
 
     def client(self) -> bonsai.LDAPClient:
         """
@@ -41,13 +35,12 @@ class UserManager:
         the client will be configured to use TLS.
         """
         client = bonsai.LDAPClient(
-            cast(str, self.settings.ldap_uri),
-            tls=self.settings.ldap_starttls
+            cast(str, self.settings.ldap_uri), tls=self.settings.ldap_starttls
         )
-        client.set_cert_policy('never')
+        client.set_cert_policy("never")
         client.set_ca_cert(None)
         client.set_ca_cert_dir(None)
-        client.set_async_connection_class(TimeLimitedAIOLDAPConnection)  # type: ignore
+        client.set_async_connection_class(TimeLimitedAIOLDAPConnection)
         return client
 
     async def create_pool(self) -> None:
@@ -59,14 +52,14 @@ class UserManager:
             client.set_credentials(
                 "SIMPLE",
                 user=self.settings.ldap_binddn,
-                password=self.settings.ldap_password
+                password=self.settings.ldap_password,
             )
         self.pool = TimeLimitedAIOConnectionPool(
             self.settings,
             client,
             minconn=self.settings.ldap_min_pool_size,
             maxconn=self.settings.ldap_max_pool_size,
-            expires=self.settings.ldap_pool_connection_lifetime_seconds
+            expires=self.settings.ldap_pool_connection_lifetime_seconds,
         )
         await self.pool.open()
 
@@ -83,10 +76,14 @@ class UserManager:
 
         Returns:
             ``True`` if the user is authenticated, ``False`` otherwise
+
         """
         if not self.pool:
             await self.create_pool()
-
+        dn = (
+            f"{self.settings.ldap_username_attribute}={username},"
+            f"{self.settings.ldap_basedn}"
+        )
         client = self.client()
         client.set_credentials("SIMPLE", user=dn, password=password)
         try:
@@ -116,6 +113,7 @@ class UserManager:
         Returns:
             ``True`` if the user exists in the LDAP directory, ``False``
             otherwise
+
         """
         return await self.get(username) is not None
 
@@ -132,10 +130,12 @@ class UserManager:
         Raises:
             LDAPError: if an error occurred while communicating with the LDAP server
             AuthenticationError: if the LDAP server rejects the credentials of
-                :py:class:`nginx_ldap_auth.settings.Settings.ldap_binddn` and :py:class:`nginx_ldap_auth.settings.Settings.ldap_password`
+                :py:class:`nginx_ldap_auth.settings.Settings.ldap_binddn` and
+                :py:class:`nginx_ldap_auth.settings.Settings.ldap_password`
 
         Returns:
             ``True`` if the user is authorized to log in, ``False`` otherwise.
+
         """
         if not self.pool:
             await self.create_pool()
@@ -150,21 +150,21 @@ class UserManager:
                     filter_exp=self.settings.ldap_authorization_filter.format(
                         username_attribute=self.settings.ldap_username_attribute,
                         fullname_attribute=self.settings.ldap_full_name_attribute,
-                        username=escape_filter_exp(username)
+                        username=escape_filter_exp(username),
                     ),
-                    attrlist=[self.settings.ldap_username_attribute]
+                    attrlist=[self.settings.ldap_username_attribute],
                 )
         except AuthenticationError:
             logger.error(
-                'ldap.is_authorized.error.invalid_credentials',
-                bind_dn=self.settings.ldap_binddn
+                "ldap.is_authorized.error.invalid_credentials",
+                bind_dn=self.settings.ldap_binddn,
             )
             raise
         except LDAPError:
             logger.exception(
-                'ldap.is_authorized.exception',
+                "ldap.is_authorized.exception",
                 bind_dn=self.settings.ldap_binddn,
-                username=username
+                username=username,
             )
             raise
         return len(results) > 0
@@ -181,11 +181,13 @@ class UserManager:
         Raises:
             LDAPError: if an error occurred while communicating with the LDAP server
             AuthenticationError: if the LDAP server rejects the credentials of
-                :py:class:`nginx_ldap_auth.settings.Settings.ldap_binddn` and :py:class:`nginx_ldap_auth.settings.Settings.ldap_password`
+                :py:class:`nginx_ldap_auth.settings.Settings.ldap_binddn` and
+                :py:class:`nginx_ldap_auth.settings.Settings.ldap_password`
 
         Returns:
             The user information as a :py:class:`User` instance, or ``None`` if
             the user is not returned by the LDAP search filter
+
         """
         if not self.pool:
             await self.create_pool()
@@ -198,33 +200,33 @@ class UserManager:
                     filter_exp=self.settings.ldap_get_user_filter.format(
                         username_attribute=self.settings.ldap_username_attribute,
                         fullname_attribute=self.settings.ldap_full_name_attribute,
-                        username=escape_filter_exp(username)
+                        username=escape_filter_exp(username),
                     ),
                     attrlist=[
                         self.settings.ldap_username_attribute,
                         self.settings.ldap_full_name_attribute,
-                    ]
+                    ],
                 )
         except AuthenticationError:
             logger.error(
-                'ldap.get_user.error.invalid_credentials',
-                bind_dn=self.settings.ldap_binddn
+                "ldap.get_user.error.invalid_credentials",
+                bind_dn=self.settings.ldap_binddn,
             )
             raise
         except LDAPError:
             logger.exception(
-                'ldap.get_user.exception',
+                "ldap.get_user.exception",
                 bind_dn=self.settings.ldap_binddn,
-                username=username
+                username=username,
             )
             raise
         if results:
             if len(results) > 1:
                 logger.warning(
-                    'ldap.get_user.error.multiple_results',
+                    "ldap.get_user.error.multiple_results",
                     bind_dn=self.settings.ldap_binddn,
                     username=username,
-                    dns=';'.join([r[0] for r in results])
+                    dns=";".join([r[0] for r in results]),
                 )
             return self.model.parse_ldap(self.settings, results[0])
         return None
@@ -238,7 +240,6 @@ class UserManager:
 
 
 class User(BaseModel):
-
     objects: ClassVar["UserManager"] = UserManager()
 
     #: The username of the user.
@@ -257,6 +258,7 @@ class User(BaseModel):
 
         Returns:
             ``True`` if the user is authenticated, ``False`` otherwise
+
         """
         return await self.objects.authenticate(self.dn, password)
 

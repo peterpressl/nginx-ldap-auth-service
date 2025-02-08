@@ -1,35 +1,33 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+from pathlib import Path
+from typing import Annotated, Any, cast
 
-import os
-from typing import cast
-
-from fastapi import FastAPI, Request, Response, status
+from fastapi import Depends, FastAPI, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import AnyUrl
+from fastapi_csrf_protect import CsrfProtect
+from fastapi_csrf_protect.exceptions import CsrfProtectError
+from pydantic import AnyUrl, Field
+from pydantic_settings import BaseSettings
 from starsessions import (
     InMemoryStore,
     SessionStore,
-    load_session,
     get_session_handler,
+    load_session,
 )
 from starsessions.stores.redis import RedisStore
-import structlog
 
 from nginx_ldap_auth import __version__
 from nginx_ldap_auth.settings import Settings
 
 from ..logging import get_logger
-
 from .forms import LoginForm
 from .middleware import SessionMiddleware
 from .models import User
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-static_dir = os.path.join(current_dir, "static")
-templates_dir = os.path.join(current_dir, "templates")
+current_dir: Path = Path(__file__).resolve().parent
+static_dir: Path = current_dir / "static"
+templates_dir: Path = current_dir / "templates"
 
 
 settings = Settings()
@@ -45,7 +43,7 @@ elif settings.session_backend == "redis":
     store = RedisStore(
         str(settings.redis_url),
         prefix=settings.redis_prefix,
-        gc_ttl=settings.session_max_age
+        gc_ttl=settings.session_max_age,
     )
     redis_url = cast(AnyUrl, settings.redis_url)
     get_logger().info(
@@ -55,6 +53,34 @@ elif settings.session_backend == "redis":
         port=redis_url.port,
         db=redis_url.path,
     )
+
+# --------------------------------------
+# CSRF Protection
+# --------------------------------------
+
+
+class CsrfSettings(BaseSettings):
+    #: The secret key to use for CSRF tokens
+    secret_key: str = Field(validation_alias="CSRF_SECRET_KEY")
+    #: We'll set the SameSite attribute on our CSRF cookies to this value
+    cookie_samesite: str = "lax"
+    #: Set our CSRF cookie to be secure
+    cookie_secure: bool = True
+    #: Set the maximum age of our CSRF cookie to 5 minutes
+    max_age: int = 300
+    #: Cookie name
+    cookie_key: str = f"{settings.cookie_name}_csrf"
+    #: Cookie domain
+    cookie_domain: str | None = settings.cookie_domain
+    #: Token location for validation -- in the csrf_token field in the body
+    token_location: str = "body"  # noqa: S105
+    #: The key to use for the CSRF token -- the name of the field in the body
+    token_key: str = "csrf_token"  # noqa: S105
+
+
+@CsrfProtect.load_config
+def get_csrf_config():
+    return CsrfSettings()
 
 
 # --------------------------------------
@@ -71,7 +97,7 @@ app.add_middleware(
     SessionMiddleware,
     store=store,
     cookie_name=settings.cookie_name,
-    lifetime=settings.session_max_age
+    lifetime=settings.session_max_age,
 )
 get_logger().info(
     "session.setup.complete",
@@ -79,14 +105,15 @@ get_logger().info(
     cookie_name=settings.cookie_name,
     cookie_domain=settings.cookie_domain,
     max_age=settings.session_max_age,
-    rolling=settings.use_rolling_session
+    rolling=settings.use_rolling_session,
 )
-templates = Jinja2Templates(directory=templates_dir)
+templates = Jinja2Templates(directory=str(templates_dir))
 
 
 # --------------------------------------
 # Startup and Shutdown Events
 # --------------------------------------
+
 
 @app.on_event("startup")
 async def startup() -> None:
@@ -108,6 +135,7 @@ async def shutdown() -> None:
 # Helper Functions
 # --------------------------------------
 
+
 async def kill_session(request: Request) -> None:
     """
     Kill the current session.
@@ -117,6 +145,7 @@ async def kill_session(request: Request) -> None:
 
     Args:
         request: The request object
+
     """
     for key in list(request.session.keys()):
         del request.session[key]
@@ -128,11 +157,17 @@ async def kill_session(request: Request) -> None:
 # --------------------------------------
 
 @app.get("/" + settings.auth_location + "/login", response_class=HTMLResponse, name="login")
-async def login(request: Request, service: str = "/"):
+async def login(
+    request: Request,
+    csrf_protect: Annotated[CsrfProtect, Depends()],
+    service: str = "/",
+) -> HTMLResponse | RedirectResponse:
     """
-    If the user is already logged in, redirect to the URI named by the ``service``,
-    query paremeter, defaulting to ``/`` if that is not present.  Otherwise, render
-    the login page.
+    If the user is already logged in -- they have a session cookie, the session
+    the cookie points to exists, and the "username" key in the session exists --
+    redirect to the URI named by the ``service``, query paremeter, defaulting to
+    ``/`` if that is not present.  Otherwise, render the login page with a fresh
+    CSRF token, storing ``service`` in the login form as a hidden field.
 
     If the header ``X-Auth-Realm`` is set, use that as the title for the login
     page.  Otherwise use
@@ -140,10 +175,17 @@ async def login(request: Request, service: str = "/"):
 
     Args:
         request: The request object
+        csrf_protect: The CSRF protection dependency
 
     Keyword Args:
         service: redirect the user to this URL after successful login
+
+    Returns:
+        If the user is already logged in, a redirect response to the service URL.
+        Otherwise, a rendered login page.
+
     """
+    csrf_token, signed_token = csrf_protect.generate_csrf_tokens()
     auth_realm = request.headers.get("x-auth-realm", settings.auth_realm)
     _logger = get_logger(request)
     _logger.info("auth.login.start", target=service)
@@ -156,34 +198,62 @@ async def login(request: Request, service: str = "/"):
             session_id=session_id,
             target=service,
         )
+        # semgrep-reason:
+        #    The service URL is passed in by nginx, and the user cannot directly
+        #    reach this URL unless nginx says it needs to, so this is safe.
+        # nosemgrep: tainted-redirect-fastapi  # noqa: ERA001
         return RedirectResponse(url=service)
-    return templates.TemplateResponse(
+    # semgrep-reason:
+    #    The service URL is passed in by nginx, and the user cannot directly
+    #    reach this URL unless nginx says it needs to, so this is safe.
+    # nosemgrep: tainted-direct-response-fastapi  # noqa: ERA001
+    response = templates.TemplateResponse(
         "login.html",
         {
             "request": request,
             "site_title": auth_realm,
             "service": service,
             "auth_login_location": "/" + settings.auth_location + "/login",
-        }
+            "csrf_token": csrf_token,
+        },
     )
+    csrf_protect.set_csrf_cookie(signed_token, response)
+    return response
 
 
 @app.post("/" + settings.auth_location + "/login", response_class=HTMLResponse, name="login_handler")
-async def login_handler(request: Request):
+async def login_handler(
+    request: Request,
+    csrf_protect: Annotated[CsrfProtect, Depends()],
+) -> HTMLResponse | RedirectResponse:
     """
-    Process our user's login request.  If authentication is successful, redirect
-    to the value of the ``service`` hidden input field on our form.
-
-    If authentication fails, display the login form again.
+    Process our user's login request.  Validate the CSRF token from the login form,
+    and attempt to bind to our LDAP server with the supplied username and password.
+    If authentication is successful, redirect to the value of the ``service``
+    hidden input field on our form.  If authentication fails, display the login
+    form again.
 
     If the header ``X-Auth-Realm`` is set, use that as the title for the login
     page.  Otherwise use
     :py:attr:`nginx_ldap_auth.settings.Settings.auth_realm`.
 
+    Side Effects:
+        If authentication is successful, the user's username is stored in the
+        session.
+
+        No matter what, the CSRF cookie is unset to prevent token reuse.
+
     Args:
         request: The request object
+        csrf_protect: The CSRF protection dependency
+
+    Returns:
+        A redirect response to the service URL if authentication is successful.
+        Otherwise, a rendered login page.
+
     """
     auth_realm = request.headers.get("x-auth-realm", settings.auth_realm)
+    await csrf_protect.validate_csrf(request)
     form = LoginForm(request)
     form.site_title = auth_realm
     form.auth_login_location = "/" + settings.auth_location + "/login"
@@ -191,18 +261,27 @@ async def login_handler(request: Request):
     if await form.is_valid():
         await load_session(request)
         request.session["username"] = form.username
-        return RedirectResponse(url=form.service, status_code=status.HTTP_302_FOUND)
+        response: HTMLResponse | RedirectResponse = RedirectResponse(
+            url=form.service, status_code=status.HTTP_302_FOUND
+        )
     else:
-        return templates.TemplateResponse("login.html", form.__dict__)
+        response = templates.TemplateResponse("login.html", form.__dict__)
+    csrf_protect.unset_csrf_cookie(response)  # prevent token reuse
+    return response
 
 
 @app.get("/" + settings.auth_location + "/logout", response_class=HTMLResponse, name="logout")
-async def logout(request: Request):
+async def logout(request: Request) -> RedirectResponse:
     """
-    Log the user out and redirect to the login page.
+    Log the user out by invalidating the sesision, and redirect them to the
+    login page.
 
     Args:
         request: The request object
+
+    Returns:
+        A redirect response to the login page.
+
     """
     _logger = get_logger(request)
     await load_session(request)
@@ -213,21 +292,28 @@ async def logout(request: Request):
 
 
 @app.get("/check")
-async def check_auth(request: Request, response: Response):
+async def check_auth(request: Request, response: Response) -> dict[str, Any]:
     """
     Ensure the user is still authorized.  If the user is authorized, return
     200 OK, otherwise return 401 Unauthorized.
 
     The user is authorized if the cookie exists, the session the cookie refers
-    to exists, and the ``username`` key in the settings is set.
-
-    Additionally, the user must still exist in LDAP, and if
+    to exists, and the ``username`` key in the settings is set.  Additionally,
+    the user must still exist in LDAP, and if
     :py:attr:`nginx_ldap_auth.settings.Settings.ldap_authorization_filter` is
     not ``None``, the user must also match the filter.
+
+    Side Effects:
+        If the user is not authorized, the session is destroyed, and the user is
+        status_code on ``response`` is set to 401.
 
     Args:
         request: The request object
         response: The response object
+
+    Returns:
+        An empty dictionary.
+
     """
     if request.cookies.get(settings.cookie_name):
         await load_session(request)
@@ -240,10 +326,30 @@ async def check_auth(request: Request, response: Response):
                 # The user is no longer authorized; log them out
                 await kill_session(request)
             return {}
-        else:
-            # Destroy the session because it is not valid
-            await kill_session(request)
+        # Destroy the session because it is not valid
+        await kill_session(request)
     # Force the user to authenticate
     response.headers["Cache-Control"] = "no-cache"
     response.status_code = status.HTTP_401_UNAUTHORIZED
     return {}
+
+
+@app.exception_handler(CsrfProtectError)
+def csrf_protect_exception_handler(request: Request, exc: CsrfProtectError) -> Response:
+    """
+    Handle CSRF protection errors.  All we're going to do is redirect the user
+    back to the login page after logging the error.
+
+    Args:
+        request: The request object
+        exc: The exception object from the CSRF protection middleware
+
+    Returns:
+        A redirect response to the login page.
+
+    """
+    _logger = get_logger(request)
+    _logger.error("auth.login.csrf.error", error=str(exc))
+    return RedirectResponse(
+        url=app.url_path_for("login"), status_code=status.HTTP_302_FOUND
+    )
